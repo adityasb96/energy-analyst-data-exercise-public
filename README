@@ -1,0 +1,1 @@
+Please use main.R for automated evaluation of code. main.R is created from a "step_through_code.Rmd" which is has all the same code + few extra edits, comments and analysis that will hopefully be easier to step through manually.
