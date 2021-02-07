@@ -1,0 +1,176 @@
+---
+title: "Coding Exercise - Aditya Belapurkar"
+author: "Aditya Belapurkar"
+date: "2/6/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(lubridate)
+library(ggplot2)
+```
+
+
+```{r Reading in Data: #TASK 1}
+#All files here are ERCOT_DA but if files from multiple markets exist in dir, can do regex matching with pattern argument to read them separately
+historical_price_files <- list.files('historicalPriceData',full.names = T) 
+
+pull_data <- function(file) {
+  if (!file.exists(file)){
+    data <- NULL
+  } else {
+    data <- fread(file)
+  }
+  data
+}
+price_data <- rbindlist(lapply(historical_price_files, pull_data))
+
+```
+
+```{r Aggregating Prices: #TASK 2}
+avg_price_data <- price_data[,.(AveragePrice = mean(Price)), by = .(SettlementPoint, Year = year(Date), Month = month(Date))]
+```
+
+```{r Saving monthly averages to csv: #TASK 3}
+dir.create('all_outputs')
+fwrite(avg_price_data, paste0('all_outputs/AveragePriceByMonth.csv'))
+```
+
+
+```{r Price Volatility: #TASK 4}
+hourly_volatility <- price_data[Price > 0  & grepl("HB_",SettlementPoint), .(HourlyVolatility = sd(log(Price))), by = .(SettlementPoint, Year = year(Date))]
+
+```
+
+```{r Saving Hourly Volatility to csv: #TASK 5}
+# if dir already exists, it wont be affected. By having this here we can run this chunk independently of the monthly avg price task
+dir.create('all_outputs')
+fwrite(hourly_volatility, paste0('all_outputs/HourlyVolatilityByYear.csv'))
+```
+
+```{r Max. Hourly Volatility: #TSK 6}
+
+max_volatility <- hourly_volatility[ ,.SD[which.max(HourlyVolatility)], by = Year]
+setcolorder(max_volatility, c("SettlementPoint","Year","HourlyVolatility"))
+fwrite(max_volatility, paste0('all_outputs/MaxVolatilityByYear.csv'))
+  
+```
+
+```{r Data Translation for Model Input: #TASK 7}
+price_data <- price_data[ ,hr:= hour(Date) + 1]  # Hour ending values as required for translated column names
+spot_prices <- dcast(price_data, SettlementPoint + date(Date) ~ reorder(paste0("X", hr),hr), value.var = 'Price') # Pivot of factors in rows into columns
+setnames(spot_prices,"SettlementPoint","Variable", skip_absent = T) 
+spot_price_by_setlmnt_point <- split(spot_prices, by = "Variable")  #Splitting data table into list of smaller ones by SettlementPoint
+
+# Saving the split spot price data as csvs
+dir.create("all_outputs/formattedSpotHistory")
+lapply(seq_along(spot_price_by_setlmnt_point), function(i){
+  fwrite(spot_price_by_setlmnt_point[[i]], paste0("all_outputs/formattedSpotHistory/","spot_",
+                                                  names(spot_price_by_setlmnt_point)[i],
+                                                  ".csv"))
+  }
+)
+```
+
+## Including Plots
+
+
+```{r Plots for Monthly Average Prices: #BNS - Mean Plots}
+# Creating a date Col for Avg Monthly Prices
+avg_price_data <- avg_price_data[ ,Date:= ymd(paste0(Year, "-", Month, "-" ,"01"))]  # A little inelegant, maybe there is a better lubridate function
+
+# SettlementHub Average Prices
+hubprices <- avg_price_data[grepl("HB_",SettlementPoint), ]
+
+ggplot(hubprices, aes(x = date(Date), y = AveragePrice, color = SettlementPoint)) + 
+  geom_line() +
+  ggtitle('Monthly Average for ERCOT Settlement Hubs') + 
+  xlab('Date') + 
+  ylab('Price') +
+  scale_x_date(date_breaks = "months", date_labels = "%b%y") + 
+  theme(axis.text.x = element_text(angle=90, hjust = 1))
+  
+# LoadZone Average Prices
+lzprices <- avg_price_data[grepl("LZ_",SettlementPoint), ]
+
+ggplot(hubprices, aes(x = date(Date), y = AveragePrice, color = SettlementPoint)) + 
+  geom_line() + 
+  ggtitle('Monthly Average for ERCOT Load Zones') +
+  xlab('Date') +
+  ylab('Price') +
+  scale_x_date(date_breaks = "months", date_labels = "%b%y") + 
+  theme(axis.text.x = element_text(angle=90, hjust = 1))
+
+```
+
+The point + line graph shows the general increasing trend of Volatility from 2016 to 2019.
+HB_WEST distinctly is the highest volatility hub.
+```{r Plots for Volatility: #BNS - Volatility Plots}
+ggplot(hourly_volatility, aes(x = Year, y = HourlyVolatility,  color = SettlementPoint)) + 
+  geom_smooth(method = lm, alpha = 0.1) + 
+  geom_point() +
+  #geom_bar(stat = 'identity', position = position_dodge(width = 0.5)) + 
+  ggtitle('Volatility trend for ERCOT Hubs') +
+  xlab('Year') +
+  ylab('Volatility')
+
+
+ggplot(hourly_volatility, aes(x = SettlementPoint, y = HourlyVolatility)) + 
+  geom_bar(stat = 'summary',  fun.y = "mean") + 
+  ggtitle('Average Volatility from 2016 to 2019') +
+  xlab('Hub') +
+  ylab('Averege Volatility')
+
+
+
+```
+
+
+```{r Hourly Shape Profile: #BNS - Hourly Shape Profile Computation}
+price_data <- price_data[,`:=`(day_of_week = wday(Date, label = T), month = month(Date))]
+avg_price_month_day_hr <- price_data[ ,.(Hour_Average =mean(Price)), by = .(SettlementPoint, month, day_of_week, hr)]
+normalized_by_hours <- avg_price_month_day_hr[ ,Normalized_Hour_Average := Hour_Average/mean(Hour_Average), by = .(SettlementPoint, month, day_of_week)]
+normalized_by_hours <- normalized_by_hours[,.SD, .SDcols = !c('Hour_Average')]
+
+normalized_by_hours_listed <- split(normalized_by_hours, by = "SettlementPoint")
+
+dir.create("all_outputs/hourlyShapeProfiles")
+lapply(seq_along(normalized_by_hours_listed), function(i){
+  fwrite(normalized_by_hours_listed[[i]], paste0("all_outputs/hourlyShapeProfiles/","profile_",
+                                                  names(normalized_by_hours_listed)[i],
+                                                  ".csv"))
+  }
+)
+
+```
+
+Weekend vs Weekday Prices:
+Middle of the week prices being highest and tapering off on weekends is a trend across settlement points.
+Wednesday prices are the highest on average.
+
+```{r Random Insights: #Bonus - Open-Ended Analysis}
+# Weekend vs Weekday Prices
+
+ggplot(price_data, aes(x = day_of_week, y =  Price)) + 
+  geom_bar(stat = 'summary',  fun.y = "mean") + 
+  ggtitle('Average Settlement Point price over 2016 to 2019 for all Hubs') +
+  xlab('Day of the Week') +
+  ylab('Average Price') + 
+  facet_wrap( ~ SettlementPoint) 
+
+
+
+# Moving Average of time series
+
+#Re-pulling original data (to get rid of added columns)
+price_data <- rbindlist(lapply(historical_price_files, pull_data))
+price_data <- price_data[, Date:= as_datetime(Date)]
+price_data_list <-  split(price_data, by = "SettlementPoint") #split by settlement point
+price_data_list_xts <- lapply(price_data_list, as.xts.data.table)
+
+# Ran out of time here, was planing to do some moving average analysis, maybe autoregression
+
+```
+
